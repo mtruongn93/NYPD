@@ -1,0 +1,165 @@
+---
+title: "NYPD Analysis"
+output:
+  html_document:
+    df_print: paged
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Cleaning and Analysis
+
+```{r echo = T, results = 'hide', message=FALSE}
+#load required libraries
+library(tidyverse)
+library(skimr)
+library(ggplot2)
+library(caret)
+```
+
+```{r}
+# File name
+file_name = "NYPD_Shooting_Incident_Data__Historic_.csv"
+
+data = read_csv(file_name)
+
+# Generate a detailed summary
+data_summary_detailed <- skim(data)
+
+# Print the detailed summary
+print(data_summary_detailed)
+```
+
+```{r}
+for (col in c("LOCATION_DESC", "PERP_AGE_GROUP", "PERP_RACE", "PERP_SEX")) {
+  unique_vals <- unique(data[[col]])
+  print(paste("Unique values in", col, ":", toString(unique_vals)))
+}
+```
+Since LOC_OF_OCCUR_DESC, LOC_CLASSFCTN_DESC columns complete rate is 0.0628, we are going to remove them
+
+Also, for LOCATION_DESC, replace empty values with NONE, 
+
+For PERP_AGE_GROUP, PERP_RACE replace empty values with UNKNOWN,
+
+For PERP_SEX replace empty values with U
+
+We will also want to create a new column based on OCCUR_TIME column and then only choose columns that we want 
+
+```{r}
+# Replace empty values in the LOCATION_DESC column with 'NONE'
+data$LOCATION_DESC <- ifelse(is.na(data$LOCATION_DESC), 'NONE', data$LOCATION_DESC)
+
+# Replace empty values in the PERP_AGE_GROUP column with 'UNKNOWN'
+data$PERP_AGE_GROUP <- ifelse(is.na(data$PERP_AGE_GROUP), 'UNKNOWN', data$PERP_AGE_GROUP)
+data$PERP_AGE_GROUP <- ifelse(data$PERP_AGE_GROUP == "(null)", 'UNKNOWN', data$PERP_AGE_GROUP)
+
+# Replace empty values in the PERP_RACE column with 'UNKNOWN'
+data$PERP_RACE <- ifelse(is.na(data$PERP_RACE), 'U', data$PERP_RACE)
+data$PERP_RACE <- ifelse(data$PERP_RACE == '(null)', 'U', data$PERP_RACE)
+
+# Replace empty values in the PERP_SEX column with 'U'
+data$PERP_SEX <- ifelse(is.na(data$PERP_SEX), 'U', data$PERP_SEX)
+data$PERP_SEX <- ifelse(data$PERP_SEX == '(null)', 'U', data$PERP_SEX)
+
+# Create new column based on OCCUR_TIME column
+data <- data %>%
+  mutate(OCCUR_TIME_PERIOD = case_when(
+    between(hour(OCCUR_TIME), 0, 6) ~ "Early Morning",
+    between(hour(OCCUR_TIME), 6, 12) ~ "Morning",
+    between(hour(OCCUR_TIME), 12, 18) ~ "Afternoon",
+    TRUE ~ "Night"
+  ))
+
+# Choose columns that we want, also "X_COORD_CD", "Y_COORD_CD", "Latitude", "Longitude", "Lon_Lat" seem not to be useful, so I am not going to choose them too
+selected_columns <- c("INCIDENT_KEY", "OCCUR_TIME_PERIOD", "BORO", "PRECINCT",
+                      "LOCATION_DESC", "STATISTICAL_MURDER_FLAG",
+                      "PERP_AGE_GROUP", "PERP_SEX", "PERP_RACE",
+                      "VIC_AGE_GROUP", "VIC_SEX", "VIC_RACE")
+
+data <- data %>%
+  select(all_of(selected_columns))
+```
+We are then create a simple model which is logistic regression in this case
+
+```{r}
+# Select relevant columns for modeling
+model_data <- data %>%
+  select(BORO, OCCUR_TIME_PERIOD, STATISTICAL_MURDER_FLAG)
+
+# Convert categorical variables to factors
+model_data <- model_data %>%
+  mutate_at(vars(BORO, OCCUR_TIME_PERIOD),
+            factor)
+
+# Split data into training and testing sets
+set.seed(1)  # For reproducibility
+train_index <- createDataPartition(model_data$STATISTICAL_MURDER_FLAG, p = 0.7, list = FALSE)
+train_data <- model_data[train_index, ]
+test_data <- model_data[-train_index, ]
+
+# Build a logistic regression model
+model <- glm(STATISTICAL_MURDER_FLAG ~ ., data = train_data, family = "binomial")
+
+# Make predictions on the test set
+predictions <- predict(model, newdata = test_data, type = "response")
+
+# Convert predicted probabilities to binary predictions
+predicted_labels <- ifelse(predictions > 0.5, 1, 0)
+
+# Evaluate the model
+confusion_matrix <- table(predicted_labels, test_data$STATISTICAL_MURDER_FLAG)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+
+# Print model
+summary(model)
+
+# Print the confusion matrix and accuracy
+print(confusion_matrix)
+print(paste("Accuracy:", accuracy))
+```
+The accuracy of the model is 0.8 which is not bad.
+
+Only two variables, namely BOROMANHATTAN and OCCUR_TIME_PERIODMorning, have demonstrated statistical significance. These two variables exhibit positive coefficients, suggesting an increased likelihood of murder occurrences in the Manhattan borough and during the morning time period.
+
+## Visualization
+
+```{r pressure, echo=FALSE}
+# Create a grouped bar plot
+boro_time_plot <- ggplot(data, aes(x = BORO, fill = OCCUR_TIME_PERIOD)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Number of Cases in Each Borough by Occurrence Time Period",
+       x = "Borough",
+       y = "Number of Cases") +
+  theme_minimal() +
+  scale_fill_manual(values = c("Early Morning" = "skyblue", "Morning" = "orange", "Afternoon" = "gray","Night" = "black"))
+
+# Print the plot
+print(boro_time_plot)
+
+# Filter data for incidents that occurred in Brooklyn
+brooklyn_data <- data[data$BORO == "BROOKLYN", ]
+
+# Create a plot for victim race in Brooklyn
+race_plot <- ggplot(brooklyn_data, aes(x = VIC_RACE, fill = VIC_RACE)) +
+  geom_bar() +
+  labs(title = "Victim Race Distribution in Incidents in Brooklyn",
+       x = "Victim Race",
+       y = "Number of Cases") +
+  theme_minimal()+
+  theme(axis.text.x = element_blank())
+
+# Print the plot
+print(race_plot)
+```
+
+From the plot, we can see that most of the cases are in Brooklyn, and the victim race are mostly Black
+
+Also these are a few bias that can affect our analysis:
+
+Geographic Bias: If certain areas are over represented or underrepresented in the data, the analysis might not reflect the overall patterns accurately.
+
+Missing Data Bias: If important variables are missing or incomplete, the analysis might be biased.
